@@ -6,12 +6,13 @@
   "main": "src/server.js",
   "type": "module",
   "scripts": {
-    "start": "node src/server.js",
-    "dev": "nodemon src/server.js"
+    "start": "node --env-file=.env src/server.js",
+    "dev": "nodemon --env-file=.env src/server.js"
   },
   "dependencies": {
     "@whiskeysockets/baileys": "^6.7.9",
     "express": "^4.21.1",
+    "firebase-admin": "^13.0.1",
     "pino": "^9.5.0",
     "qrcode": "^1.5.4"
   },

@@ -1,15 +1,12 @@
-import path from "path";
-import { fileURLToPath } from "url";
 import P from "pino";
 import QRCode from "qrcode";
-import makeWASocket, { useMultiFileAuthState, DisconnectReason } from "@whiskeysockets/baileys";
+import makeWASocket, { DisconnectReason, fetchLatestBaileysVersion } from "@whiskeysockets/baileys";
+import { useFirestoreAuthState } from "./firestoreAuthState.js";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const AUTH_DIR = path.join(__dirname, "..", "auth_info");
-
-// In-memory only — fine for one shop/one number. Swap for a Firestore-backed
-// store before this runs anywhere the filesystem isn't persistent (Render
-// free tier wipes local disk on restart/redeploy).
+// receivedMessages is in-memory only (fine — it's a rolling recent-activity
+// log, not the source of truth). The WhatsApp session itself (creds.json +
+// keys) lives in Firestore via useFirestoreAuthState, so it survives a host
+// restart/redeploy with no local disk involved at all.
 export const state = {
   sock: null,
   status: "disconnected", // "disconnected" | "qr" | "connected"
@@ -33,15 +30,19 @@ function extractText(message) {
 }
 
 export async function start() {
-  const { state: authState, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+  const { state: authState, saveCreds } = await useFirestoreAuthState();
+  const { version } = await fetchLatestBaileysVersion();
 
   const sock = makeWASocket({
     auth: authState,
+    version,
     logger: P({ level: "silent" }),
   });
   state.sock = sock;
 
-  sock.ev.on("creds.update", saveCreds);
+  sock.ev.on("creds.update", () => {
+    saveCreds().catch((err) => console.error("[whatsapp] saveCreds failed:", err));
+  });
 
   sock.ev.on("connection.update", async (update) => {
     const { connection, lastDisconnect, qr } = update;
@@ -61,13 +62,7 @@ export async function start() {
       state.status = "disconnected";
       const loggedOut =
         lastDisconnect?.error?.output?.statusCode === DisconnectReason.loggedOut;
-      console.log(
-        "[whatsapp] connection closed — logged out:",
-        loggedOut,
-        "reason:",
-        lastDisconnect?.error?.message,
-        lastDisconnect?.error?.output?.statusCode,
-      );
+      console.log("[whatsapp] connection closed — logged out:", loggedOut);
       // Any other close reason (network blip, server restart) is expected to
       // reconnect using the saved session, same as WhatsApp Web reconnecting
       // in a browser tab. Logged-out is the only case needing a fresh QR.
