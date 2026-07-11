@@ -67,3 +67,20 @@ export async function useFirestoreAuthState() {
     saveCreds,
   };
 }
+
+/** Wipes the stored session (creds + every key doc) so the next start()
+ * generates a genuinely fresh QR — used on disconnect, and when the phone's
+ * own "Remove linked device" invalidates the old creds. */
+export async function clearSession() {
+  const db = getDb();
+  const credsRef = db.doc(`waSessions/${SESSION_ID}`);
+  const keysCol = db.collection(`waSessions/${SESSION_ID}/keys`);
+
+  const keyDocs = await keysCol.listDocuments();
+  for (let i = 0; i < keyDocs.length; i += 400) {
+    const batch = db.batch();
+    for (const ref of keyDocs.slice(i, i + 400)) batch.delete(ref);
+    await batch.commit();
+  }
+  await credsRef.delete();
+}
