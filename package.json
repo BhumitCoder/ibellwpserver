@@ -4,6 +4,7 @@
   "private": true,
   "description": "Standalone WhatsApp sender/receiver service for AIM (Baileys-based, own-number QR link)",
   "main": "src/server.js",
+  "type": "module",
   "scripts": {
     "start": "node src/server.js",
     "dev": "nodemon src/server.js"

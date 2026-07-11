@@ -1,5 +1,5 @@
-const express = require("express");
-const wa = require("./whatsapp");
+import express from "express";
+import * as wa from "./whatsapp.js";
 
 const PORT = process.env.PORT || 3000;
 const app = express();

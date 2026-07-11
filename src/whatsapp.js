@@ -1,25 +1,23 @@
-const path = require("path");
-const P = require("pino");
-const QRCode = require("qrcode");
-const {
-  default: makeWASocket,
-  useMultiFileAuthState,
-  DisconnectReason,
-} = require("@whiskeysockets/baileys");
+import path from "path";
+import { fileURLToPath } from "url";
+import P from "pino";
+import QRCode from "qrcode";
+import makeWASocket, { useMultiFileAuthState, DisconnectReason } from "@whiskeysockets/baileys";
 
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const AUTH_DIR = path.join(__dirname, "..", "auth_info");
 
 // In-memory only — fine for one shop/one number. Swap for a Firestore-backed
 // store before this runs anywhere the filesystem isn't persistent (Render
 // free tier wipes local disk on restart/redeploy).
-const state = {
+export const state = {
   sock: null,
   status: "disconnected", // "disconnected" | "qr" | "connected"
   qrDataUrl: null,
   receivedMessages: [],
 };
 
-function toJid(phone) {
+export function toJid(phone) {
   const digits = String(phone).replace(/\D/g, "");
   return `${digits}@s.whatsapp.net`;
 }
@@ -34,7 +32,7 @@ function extractText(message) {
   );
 }
 
-async function start() {
+export async function start() {
   const { state: authState, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
 
   const sock = makeWASocket({
@@ -63,7 +61,13 @@ async function start() {
       state.status = "disconnected";
       const loggedOut =
         lastDisconnect?.error?.output?.statusCode === DisconnectReason.loggedOut;
-      console.log("[whatsapp] connection closed — logged out:", loggedOut);
+      console.log(
+        "[whatsapp] connection closed — logged out:",
+        loggedOut,
+        "reason:",
+        lastDisconnect?.error?.message,
+        lastDisconnect?.error?.output?.statusCode,
+      );
       // Any other close reason (network blip, server restart) is expected to
       // reconnect using the saved session, same as WhatsApp Web reconnecting
       // in a browser tab. Logged-out is the only case needing a fresh QR.
@@ -87,7 +91,7 @@ async function start() {
   });
 }
 
-async function sendMessage({ phone, message, pdfBase64, fileName }) {
+export async function sendMessage({ phone, message, pdfBase64, fileName }) {
   if (state.status !== "connected") {
     const err = new Error("WhatsApp not connected — scan the QR code first");
     err.code = "NOT_CONNECTED";
@@ -112,5 +116,3 @@ async function sendMessage({ phone, message, pdfBase64, fileName }) {
   err.code = "BAD_REQUEST";
   throw err;
 }
-
-module.exports = { start, sendMessage, toJid, state };
