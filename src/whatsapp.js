@@ -13,7 +13,32 @@ export const state = {
   qrDataUrl: null,
   phone: null, // e.g. "919978581685" once connected
   receivedMessages: [],
+  connectedAt: null,
 };
+
+// Sending immediately after the socket has just (re)connected — the most
+// common trigger being Render's free tier spinning the whole process back up
+// from a cold start after 15+ minutes idle — hands the message to Baileys
+// successfully (so our /send reports ok:true) before WhatsApp's own delivery
+// pipeline has finished resyncing this session, and the recipient's client
+// can sit on "Waiting for this message" for a long time as a result. A short
+// grace period after reconnecting, before this process will actually send
+// anything, gives that resync a chance to finish first. This does not fully
+// eliminate the problem (WhatsApp's delivery infra is outside this process'
+// control either way) — the real fix is not letting the service go to sleep
+// in the first place (see README: external uptime ping on /health).
+const POST_CONNECT_GRACE_MS = 6000;
+
+// Sent-message delivery tracking — purely observational (nothing here
+// retries or blocks anything) so a stuck delivery shows up in the logs
+// pointing at WhatsApp-side congestion rather than looking like a silent,
+// unexplained failure the next time this comes up.
+const pendingAcks = new Map(); // messageId -> { to: string, sentAt: number, status: number }
+const PENDING_ACK_WARN_MS = 20000;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 function phoneFromJid(jid) {
   if (!jid) return null;
@@ -67,6 +92,7 @@ export async function start() {
       state.status = "connected";
       state.qrDataUrl = null;
       state.phone = phoneFromJid(sock.user?.id);
+      state.connectedAt = Date.now();
       console.log("[whatsapp] connected:", state.phone);
     }
 
@@ -111,6 +137,25 @@ export async function start() {
       console.log("[whatsapp] incoming:", entry.from, entry.text);
     }
   });
+
+  // Observational only — Baileys resolves sendMessage() as soon as it hands
+  // the message to its own socket, not once WhatsApp actually delivers it.
+  // This is what actually reports whether a send made it out for real, so a
+  // stuck delivery shows up here (pointing at WhatsApp-side congestion, most
+  // often right after a cold reconnect) instead of looking like our own code
+  // silently failed.
+  sock.ev.on("messages.update", (updates) => {
+    for (const { key, update } of updates) {
+      const tracked = pendingAcks.get(key.id);
+      if (!tracked) continue;
+      if (typeof update.status === "number") tracked.status = update.status;
+      // status >= 2 is Baileys' SERVER_ACK or later — WhatsApp's servers
+      // have it, delivery is now out of this process' hands either way.
+      if (tracked.status >= 2) {
+        pendingAcks.delete(key.id);
+      }
+    }
+  });
 }
 
 /** Owner-initiated disconnect from the AIM Settings page — a real WhatsApp
@@ -139,25 +184,51 @@ export async function disconnect() {
   }
 }
 
+function trackDelivery(sent, jid) {
+  if (!sent?.key?.id) return;
+  const entry = { to: jid, sentAt: Date.now(), status: 0 };
+  pendingAcks.set(sent.key.id, entry);
+  setTimeout(() => {
+    const tracked = pendingAcks.get(sent.key.id);
+    if (!tracked) return; // already acknowledged — nothing to warn about
+    console.warn(
+      `[whatsapp] message to ${jid} still not acknowledged by WhatsApp ${PENDING_ACK_WARN_MS / 1000}s ` +
+        "after sending — this is WhatsApp-side delivery congestion (common right after this service " +
+        "wakes from being idle), not a failure in the send call itself.",
+    );
+  }, PENDING_ACK_WARN_MS);
+}
+
 export async function sendMessage({ phone, message, pdfBase64, fileName }) {
   if (state.status !== "connected") {
     const err = new Error("WhatsApp not connected — scan the QR code first");
     err.code = "NOT_CONNECTED";
     throw err;
   }
+
+  // Just reconnected (e.g. Render's free tier waking this process back up
+  // from a cold start) — give WhatsApp's own session resync a moment before
+  // handing it anything to deliver. See POST_CONNECT_GRACE_MS above.
+  const sinceConnect = Date.now() - (state.connectedAt ?? 0);
+  if (sinceConnect < POST_CONNECT_GRACE_MS) {
+    await sleep(POST_CONNECT_GRACE_MS - sinceConnect);
+  }
+
   const jid = toJid(phone);
 
   if (pdfBase64) {
-    await state.sock.sendMessage(jid, {
+    const sent = await state.sock.sendMessage(jid, {
       document: Buffer.from(pdfBase64, "base64"),
       mimetype: "application/pdf",
       fileName: fileName || "document.pdf",
       caption: message || "",
     });
+    trackDelivery(sent, jid);
     return;
   }
   if (message) {
-    await state.sock.sendMessage(jid, { text: message });
+    const sent = await state.sock.sendMessage(jid, { text: message });
+    trackDelivery(sent, jid);
     return;
   }
   const err = new Error("Provide `message` and/or `pdfBase64`");
